@@ -3,8 +3,11 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import argparse
+import os
 
-from dataset import InductionHeadsDataset
+# Import from induction_heads_data.py instead of dataset module
+from induction_heads_data import InductionHeadsDataset
+
 from model import InductionHeadsModel
 
 # ---------- Hyper‑parameters ----------
@@ -52,14 +55,29 @@ def evaluate(model, val_loaders):
 
 def make_loader(size, seq_len, shuffle=True):
     # Dataset generates data randomly each step
-    dataset = InductionHeadsDataset(size=size, seq_len=seq_len)
+    # Updated to match parameter name in InductionHeadsDataset
+    dataset = InductionHeadsDataset(size=size, seq_length=seq_len)
     return DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=shuffle)
+
+
+def load_saved_datasets():
+    """Load pre-generated datasets if available, otherwise create them on the fly"""
+    if os.path.exists('data/training_datasets.pt') and os.path.exists('data/validation_datasets.pt'):
+        print("Loading saved datasets...")
+        training_datasets = torch.load('data/training_datasets.pt')
+        validation_datasets = torch.load('data/validation_datasets.pt')
+        return training_datasets, validation_datasets
+    else:
+        print("No saved datasets found. Please run save_dataset.py first.")
+        exit(1)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train induction heads task.")
     parser.add_argument('--model_type', choices=MODEL_CONFIG.keys(), required=True,
                         help="Model variant to train (affects epochs and LR)")
+    parser.add_argument('--use_saved_data', action='store_true',
+                        help="Use saved datasets instead of generating on the fly")
     args = parser.parse_args()
 
     config = MODEL_CONFIG[args.model_type]
@@ -71,17 +89,39 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 
-    # Prepare validation loaders for sequence lengths 2^6..2^20
-    val_seq_lens = [2**i for i in range(6, 21)]
-    val_loaders = {L: make_loader(VAL_SET_SIZE, seq_len=L, shuffle=False)
-                   for L in val_seq_lens}
+    # Prepare validation loaders
+    if args.use_saved_data:
+        # Load from saved files
+        training_datasets, validation_datasets = load_saved_datasets()
+        from induction_heads_data import get_dataloaders
+        _, val_loaders = get_dataloaders(training_datasets, validation_datasets)
+    else:
+        # Create validation loaders for sequence lengths 2^6..2^20
+        val_seq_lens = [2**i for i in range(6, 21)]
+        val_loaders = {L: make_loader(VAL_SET_SIZE, seq_len=L, shuffle=False)
+                    for L in val_seq_lens}
 
     # Training loop
     total_steps = epochs * EPOCH_SIZE
     global_step = 0
     t0 = time.time()
     for epoch in range(1, epochs + 1):
-        train_loader = make_loader(EPOCH_SIZE, seq_len=SEQ_LEN, shuffle=True)
+            # train_loader = make_loader(EPOCH_SIZE, seq_len=SEQ_LEN, shuffle=True)
+        if args.use_saved_data and SEQ_LEN in training_datasets:
+            # Use saved dataset if available for the specified sequence length
+            train_dataset = training_datasets[SEQ_LEN]
+            train_loader = DataLoader(
+                train_dataset, 
+                batch_size=BATCH_SIZE, 
+                shuffle=True,
+                num_workers=2,
+                pin_memory=True
+            )
+        else:
+            # Generate on the fly
+            train_loader = make_loader(EPOCH_SIZE, seq_len=SEQ_LEN, shuffle=True)
+            
+            
         for step, (x, y) in enumerate(train_loader, 1):
             global_step += 1
             model.train()
