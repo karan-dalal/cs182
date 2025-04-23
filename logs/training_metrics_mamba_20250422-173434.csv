@@ -1,0 +1,1 @@
+epoch,global_step,seq_len,precision,recall,f1,time_minutes
