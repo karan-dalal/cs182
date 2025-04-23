@@ -100,9 +100,8 @@ class InductionHeadsDataset(Dataset):
             # Mark the next position as requiring the specific token
             labels[pos+1] = expected_token
             
-            # For training, also place the expected token B in the sequence
-            if self.split == 'train':
-                sequence[pos+1] = expected_token
+            # Also place the expected token B in the sequence
+            sequence[pos+1] = expected_token
         
         # Fill remaining positions with random tokens
         for i in range(self.seq_length):
