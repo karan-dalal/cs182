@@ -61,9 +61,8 @@ class InductionHeadsDataset(Dataset):
     
     def generate_sequence(self):
         """Generate a sequence with patterns and triggers for induction heads testing"""
-        # Initialize sequence with zeros (will be filled with random tokens later)
         sequence = [0] * self.seq_length
-        
+
         # Define pattern and trigger regions
         pattern_end = self.seq_length // 2 - 1
         
@@ -101,9 +100,8 @@ class InductionHeadsDataset(Dataset):
             # Mark the next position as requiring the specific token
             labels[pos+1] = expected_token
             
-            # For training, also place the expected token B in the sequence
-            if self.split == 'train':
-                sequence[pos+1] = expected_token
+            # Also place the expected token B in the sequence
+            sequence[pos+1] = expected_token
         
         # Fill remaining positions with random tokens
         for i in range(self.seq_length):
@@ -111,111 +109,3 @@ class InductionHeadsDataset(Dataset):
                 sequence[i] = random.randint(1, self.vocab_size-1)
         
         return sequence, labels
-
-def create_datasets(max_seq_length=1048576):
-    """
-    Create training and validation datasets for the induction heads task.
-    
-    Args:
-        max_seq_length: Maximum sequence length to consider
-    
-    Returns:
-        training_datasets: Dict mapping sequence lengths to training datasets
-        validation_datasets: Dict mapping sequence lengths to validation datasets
-    """
-    # Calculate number of training examples based on sequence length
-    # More examples for shorter sequences, fewer for longer ones
-    training_datasets = {}
-    validation_datasets = {}
-    
-    # Generate sequence lengths from 2^6 to log2(max_seq_length)
-    seq_lengths = [2**i for i in range(6, int(math.log2(max_seq_length))+1)]
-    
-    # Training dataset scaling factor - inversely proportional to sequence length
-    base_train_size = 8192 * 8  # From Mamba paper: 8192 steps with batch size 8
-    
-    for length in seq_lengths:
-        # Scale training examples: more for short sequences, fewer for long ones
-        # For the base length (256), use the full size; scale inversely with length
-        scaling_factor = min(1.0, 256 / length)
-        train_size = int(base_train_size * scaling_factor)
-        
-        train_size = max(train_size, 1000)
-        
-        # Fixed number of validation examples per length
-        val_size = 100  
-        
-        # Create datasets
-        training_datasets[length] = InductionHeadsDataset(
-            split='train',
-            seq_length=length,
-            vocab_size=16,
-            num_patterns=4,
-            size=train_size
-        )
-        
-        validation_datasets[length] = InductionHeadsDataset(
-            split='val',
-            seq_length=length,
-            vocab_size=16,
-            num_patterns=4,
-            size=val_size,
-            fixed_seed=42  
-        )
-    
-    return training_datasets, validation_datasets
-
-def get_dataloaders(training_datasets, validation_datasets, batch_sizes=None):
-    """
-    Create PyTorch DataLoaders for the training and validation datasets.
-    
-    Args:
-        training_datasets: Dict mapping sequence lengths to training datasets
-        validation_datasets: Dict mapping sequence lengths to validation datasets
-        batch_sizes: Dict mapping sequence lengths to batch sizes
-                    (default: 8 for length 256, scaled for others)
-    
-    Returns:
-        training_loaders: Dict mapping sequence lengths to training DataLoaders
-        validation_loaders: Dict mapping sequence lengths to validation DataLoaders
-    """
-    training_loaders = {}
-    validation_loaders = {}
-    
-    if batch_sizes is None:
-        batch_sizes = {}
-        for length in training_datasets.keys():
-            # Scale batch size inversely with sequence length, base is 8 at length 256
-            batch_sizes[length] = max(1, min(8, int(8 * 256 / length)))
-    
-    for length, dataset in training_datasets.items():
-        batch_size = batch_sizes.get(length, 1)
-        training_loaders[length] = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=2,
-            pin_memory=True
-        )
-    
-    for length, dataset in validation_datasets.items():
-        batch_size = batch_sizes.get(length, 1)
-        validation_loaders[length] = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=2,
-            pin_memory=True
-        )
-    
-    return training_loaders, validation_loaders
-
-
-# Create datasets up to sequence length 2^16 = 65536
-training_datasets, validation_datasets = create_datasets(max_seq_length=65536)
-
-# Create dataloaders with default batch sizing
-training_loaders, validation_loaders = get_dataloaders(training_datasets, validation_datasets)
-
-# # Access the standard training loader (length 256)
-# train_loader_256 = training_loaders[256]
