@@ -9,7 +9,7 @@ class SelectiveCopyingDataset(Dataset):
     """
     Dataset for the selective copying task from the Mamba paper.
     Generates sequences with tokens to memorize scattered randomly throughout
-    a noise sequence, followed by marker tokens.
+    a noise sequence, followed by marker tokens that should trigger recall.
     """
     def __init__(self,
                  split='train',
@@ -57,24 +57,26 @@ class SelectiveCopyingDataset(Dataset):
             rand_state = random.getstate()
             random.seed(self.fixed_seed + idx)
 
-        inputs, targets = self.generate_sequence()
+        sequence, targets = self.generate_sequence()
 
         # Restore random state if needed
         if self.fixed_seed is not None:
             random.setstate(rand_state)
 
-        return torch.tensor(inputs, dtype=torch.long), torch.tensor(targets, dtype=torch.long)
+        return torch.tensor(sequence, dtype=torch.long), torch.tensor(targets, dtype=torch.long)
 
     def generate_sequence(self):
         """Generate a sequence for the selective copying task"""
         # Generate random tokens to memorize (values between 1 and vocab_size-2)
         tokens_to_copy = [random.randint(1, self.vocab_size-2) for _ in range(self.num_tokens_to_copy)]
 
-        # Create a sequence of zeros (padding/noise)
+        # Create a sequence filled with noise (zeros)
         sequence = [0] * self.seq_length
 
         # Randomly choose positions for the tokens to be copied
-        positions = random.sample(range(self.seq_length), self.num_tokens_to_copy)
+        # We'll place them in the first half of the sequence
+        first_half_end = self.seq_length // 2
+        positions = random.sample(range(first_half_end), self.num_tokens_to_copy)
         positions.sort()  # Sort positions to maintain order
 
         # Place tokens at the chosen positions
@@ -88,7 +90,7 @@ class SelectiveCopyingDataset(Dataset):
         # Combine the main sequence with marker tokens
         inputs = sequence + marker_sequence
 
-        # The target is the tokens to be copied
+        # The target is the tokens to be copied (these should be predicted at marker positions)
         targets = tokens_to_copy
 
         return inputs, targets
@@ -195,22 +197,28 @@ def get_dataloaders(training_datasets, validation_datasets=None, batch_sizes=Non
     return training_loaders, validation_loaders
 
 
-def save_datasets(training_datasets, save_path='data/selective_copying_datasets.pt'):
-    """Save only the training datasets to disk (most essential)"""
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    torch.save(training_datasets, save_path)
+def save_datasets(training_datasets, validation_datasets, save_path='data'):
+    """Save datasets to disk"""
+    os.makedirs(save_path, exist_ok=True)
+    torch.save(training_datasets, os.path.join(save_path, 'selective_copying_train_datasets.pt'))
+    torch.save(validation_datasets, os.path.join(save_path, 'selective_copying_val_datasets.pt'))
     print(f"Datasets saved to {save_path}")
 
 
-def load_datasets(save_path='data/selective_copying_datasets.pt'):
+def load_datasets(save_path='data'):
     """Load previously saved datasets"""
     try:
-        training_datasets = torch.load(save_path)
+        train_path = os.path.join(save_path, 'selective_copying_train_datasets.pt')
+        val_path = os.path.join(save_path, 'selective_copying_val_datasets.pt')
+        
+        training_datasets = torch.load(train_path)
+        validation_datasets = torch.load(val_path)
+        
         print(f"Datasets loaded successfully from {save_path}")
-        return training_datasets
+        return training_datasets, validation_datasets
     except FileNotFoundError:
-        print(f"Dataset file not found at {save_path}")
-        return None
+        print(f"Dataset files not found in {save_path}")
+        return None, None
 
 
 def main():
@@ -238,26 +246,27 @@ def main():
             print(f"  Sample input shape: {train_sample_x.shape}")
             print(f"  Sample target shape: {train_sample_y.shape}")
 
-            # Count non-zero tokens in input (tokens to memorize)
-            non_zero = (train_sample_x > 0) & (train_sample_x < train_dataset.vocab_size - 1)
-            print(f"  Number of non-zero tokens to copy: {non_zero.sum().item()}")
+            # Count marker tokens in input
+            marker_token = train_dataset.vocab_size - 1
+            marker_count = (train_sample_x == marker_token).sum().item()
+            print(f"  Number of marker tokens: {marker_count}")
 
             # Show a few of the tokens to copy
             print(f"  Target tokens to copy: {train_sample_y[:5].tolist()}...")
 
-    # Save only the training datasets (most essential)
-    save_datasets(training_datasets)
+    # Save the datasets
+    save_datasets(training_datasets, validation_datasets)
 
     # Create training dataloaders (don't save them)
     print("\nCreating dataloaders...")
-    training_loaders, _ = get_dataloaders(training_datasets, num_workers=0)
+    training_loaders, _ = get_dataloaders(training_datasets, validation_datasets, num_workers=0)
 
     # Show example of accessing a dataloader
     print("\n--- Example Usage ---")
     print("# Load datasets")
-    print("training_datasets = load_datasets()")
+    print("training_datasets, validation_datasets = load_datasets()")
     print("# Create dataloaders on the fly")
-    print("training_loaders, _ = get_dataloaders(training_datasets)")
+    print("training_loaders, validation_loaders = get_dataloaders(training_datasets, validation_datasets)")
     print("# Get a specific dataloader")
     print("train_loader_4096 = training_loaders[4096]")
     print("# Use in training loop")
