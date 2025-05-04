@@ -7,6 +7,10 @@ class InductionHeadsDataset(Dataset):
     """
     Dataset for the induction heads task from the Mamba paper.
     Generates sequences with token pairs in the first half and triggers in the second half.
+    Each sample has:
+        • first ½:   k‑v pairs  (A→B)
+        • second ½: triggers k   whose target is   v  at the next position
+    Non‑target positions get label -1 so they can be masked out.
     """
     def __init__(self, 
                  split='train',
@@ -26,6 +30,8 @@ class InductionHeadsDataset(Dataset):
             size: Number of examples in the dataset
             fixed_seed: Seed for reproducibility (used for validation)
         """
+        max_pairs = (seq_length // 2 - 1) // 2
+        num_patterns = min(max_pairs, num_patterns)
         self.seq_length = seq_length
         self.vocab_size = vocab_size
         self.num_patterns = num_patterns
@@ -47,65 +53,61 @@ class InductionHeadsDataset(Dataset):
     def __getitem__(self, idx):
         """Generate a sequence and its corresponding labels for the given index"""
         # Set seed for reproducibility if in validation mode
-        if self.fixed_seed is not None:
-            rand_state = random.getstate()
-            random.seed(self.fixed_seed + idx)
         
-        sequence, labels = self.generate_sequence()
-        
-        # Restore random state if needed
-        if self.fixed_seed is not None:
-            random.setstate(rand_state)
+        rng = random if self.fixed_seed is None else random.Random(self.fixed_seed + idx)
+        sequence, labels = self.generate_sequence(rng)
             
         return torch.tensor(sequence, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
     
-    def generate_sequence(self):
+    def generate_sequence(self, rng: random.Random):
         """Generate a sequence with patterns and triggers for induction heads testing"""
-        sequence = [0] * self.seq_length
+        L          = self.seq_length
+        half       = L // 2
+        pattern_end = half - 1                    # last idx allowed for *A* so that B is ≤ half‑1
+        seq    = [0] * L                          # 0 = noise token
+        labels = [-1] * L                         # -1 ➟ will be masked out
 
-        # Define pattern and trigger regions
-        pattern_end = self.seq_length // 2 - 1
-        
-        # Generate token pairs (A→B) where A and B are different tokens
-        patterns = []
-        for _ in range(self.num_patterns):
-            token_a = random.randint(1, self.vocab_size-1)  # Avoid using token 0
-            token_b = random.randint(1, self.vocab_size-1)
-            while token_b == token_a:  # Ensure A and B are different
-                token_b = random.randint(1, self.vocab_size-1)
-            patterns.append((token_a, token_b))
-        
-        # Place patterns in first half of sequence with spacing between them
-        first_half_positions = random.sample(range(pattern_end), len(patterns))
-        first_half_positions.sort()  # Sort positions to maintain order
-        
-        for i, pos in enumerate(first_half_positions):
-            sequence[pos] = patterns[i][0]    # Place A
-            sequence[pos+1] = patterns[i][1]  # Place B next to A
-        
-        # Create labels array (-1 indicates no specific prediction)
-        labels = [-1] * self.seq_length
-        
-        # Place triggers in second half and mark labels
-        # Select a subset of patterns to test
-        triggers = random.sample(patterns, min(len(patterns), 2))
-        second_half_positions = random.sample(range(pattern_end + 1, self.seq_length - 1), len(triggers))
-        
-        for i, pos in enumerate(second_half_positions):
-            trigger_token = triggers[i][0]  # Token A
-            expected_token = triggers[i][1]  # Token B that should follow
-            
-            sequence[pos] = trigger_token
-            
-            # Mark the next position as requiring the specific token
-            labels[pos+1] = expected_token
-            
-            # Also place the expected token B in the sequence
-            sequence[pos+1] = expected_token
-        
-        # Fill remaining positions with random tokens
-        for i in range(self.seq_length):
-            if sequence[i] == 0:  # If position still has a placeholder
-                sequence[i] = random.randint(1, self.vocab_size-1)
-        
-        return sequence, labels
+        # -------------------------------------------------- #
+        # 1. sample distinct key‑value pairs
+        pairs = []
+        while len(pairs) < self.num_patterns:
+            k = rng.randint(1, self.vocab_size - 1)
+            v = rng.randint(1, self.vocab_size - 1)
+            if v != k and (k, v) not in pairs:
+                pairs.append((k, v))
+
+        # -------------------------------------------------- #
+        # 2. place each (A,B) non‑overlapping in the 1st half
+        occupied = set()
+        for k, v in pairs:
+            while True:
+                pos = rng.randint(0, pattern_end - 1)  # leave room for +1
+                if pos     not in occupied and \
+                   pos + 1 not in occupied:
+                    break
+            seq[pos]     = k
+            seq[pos + 1] = v
+            occupied.update({pos, pos + 1})
+
+        # -------------------------------------------------- #
+        # 3. choose a subset of pairs to trigger in 2nd half
+        n_trig  = min(2, len(pairs))
+        triggers = rng.sample(pairs, n_trig)
+        for k, v in triggers:
+            while True:
+                pos = rng.randint(half, L - 2)   # also leave room for +1
+                if seq[pos] == 0 and seq[pos + 1] == 0:
+                    break
+            seq[pos]     = k          # key only
+            seq[pos + 1] = v          # correct value
+            labels[pos + 1] = v       # compute loss *only* here
+
+        # -------------------------------------------------- #
+        # 4. fill remaining blanks with random noise (≠0 optional)
+        remaining = [i for i, tok in enumerate(seq) if tok == 0]
+        if remaining:
+            seq_tensor = torch.randint(1, self.vocab_size, (len(remaining),))
+            for i, sidx in enumerate(remaining):
+                seq[sidx] = int(seq_tensor[i])
+
+        return seq, labels
